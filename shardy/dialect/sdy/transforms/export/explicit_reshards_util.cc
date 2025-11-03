@@ -17,11 +17,11 @@ limitations under the License.
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <tuple>
 #include <utility>
-
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -181,7 +181,145 @@ void insertExplicitReshards(Operation* op,
   }
 }
 
-namespace {
+// Inserts an `sdy.all-reduce` for each result of `op` if any of its reduction
+// factors is sharded in `commonAxesPerFactor`.
+void insertAllReduces(Operation* op,
+                      const AxesPerFactorWithMesh& commonAxesPerFactorWithMesh,
+                      OpShardingRuleAttr shardingRule, IRRewriter& rewriter) {
+  rewriter.setInsertionPointAfter(op);
+  SmallVector<AxisRefAttr> reductionAxes;
+  for (int64_t reductionFactor : shardingRule.getReductionFactors()) {
+    reductionAxes.append(commonAxesPerFactorWithMesh.axes[reductionFactor]);
+  }
+  if (reductionAxes.empty()) {
+    return;
+  }
+
+  // AI Generated
+  // if (auto dotGeneralOp = dyn_cast<stablehlo::DotGeneralOp>(op)) {
+  //   // Check if the operands to DotGeneralOp are conformable.
+  //   // Operands are conformable if, for each factor that maps to both LHS and RHS
+  //   // (i.e., batching or contracting factors), the factor shardings match.
+  //   TensorShardingAttr lhsSharding = getSharding(dotGeneralOp.getLhs());
+  //   TensorShardingAttr rhsSharding = getSharding(dotGeneralOp.getRhs());
+    
+  //   bool operandsAreConformable = true;
+  //   if (lhsSharding && rhsSharding) {
+  //     // Build a ShardingProjection to get factor-level shardings
+  //     MeshAttr mesh = commonAxesPerFactorWithMesh.mesh.attr();
+  //     SmallVector<TensorShardingAttr> operandShardings = {lhsSharding, rhsSharding};
+  //     ShardingProjection operandProjection = ShardingProjection::build(
+  //         operandShardings, /*resultShardings=*/{}, shardingRule, mesh,
+  //         /*closedIfMissing=*/true);
+      
+  //     const TensorFactorShardings& lhsFactorShardings =
+  //         operandProjection.getOperand(0);
+  //     const TensorFactorShardings& rhsFactorShardings =
+  //         operandProjection.getOperand(1);
+      
+  //     // Check each factor that appears in both operands
+  //     for (int64_t factorIndex = 0; factorIndex < shardingRule.getNumFactors();
+  //          ++factorIndex) {
+  //       std::optional<ArrayRef<AxisRefAttr>> lhsAxes =
+  //           getFactorSharding(lhsFactorShardings, factorIndex);
+  //       std::optional<ArrayRef<AxisRefAttr>> rhsAxes =
+  //           getFactorSharding(rhsFactorShardings, factorIndex);
+        
+  //       // If this factor maps to both operands, check if shardings match
+  //       if (lhsAxes && rhsAxes) {
+  //         if (*lhsAxes != *rhsAxes) {
+  //           // Factor shardings don't match - operands are not conformable
+  //           operandsAreConformable = false;
+  //           break;
+  //         }
+  //       }
+  //     }
+  //   } else {
+  //     // If either operand doesn't have sharding, they're trivially conformable
+  //     operandsAreConformable = true;
+  //   }
+    
+  //   if (operandsAreConformable) {
+  //     return;
+  //   }
+  // }
+
+
+  MeshAttr mesh = commonAxesPerFactorWithMesh.mesh.attr();
+  // Written by me
+  if (isa<stablehlo::DotGeneralOp>(op) || isa<stablehlo::DotOp>(op)) {
+    ShardingProjection opProjection = ShardingProjection::build(op, shardingRule, mesh);
+    assert(opProjection.getNumOperands() == 2);
+    assert(opProjection.getNumResults() == 1);
+    TensorFactorShardings lhs = opProjection.getOperand(0);
+    TensorFactorShardings rhs = opProjection.getOperand(1);
+    TensorFactorShardings result = opProjection.getResult(0);
+
+    llvm::DenseSet<int64_t> common_factors;
+    llvm::DenseSet<int64_t> all_factors;
+    bool operands_are_conformable = true;
+    for (const int64_t factor : lhs.factorIndexToSharding.keys()) {
+      all_factors.insert(factor);
+      if (rhs.factorIndexToSharding.contains(factor)) {
+        common_factors.insert(factor);
+      }
+    }
+    for (const int64_t factor : rhs.factorIndexToSharding.keys()) {
+      all_factors.insert(factor);
+    }
+
+    llvm::DenseSet<int64_t> disjoint_factors;
+    for (const int64_t factor : all_factors) {
+      if (!common_factors.contains(factor)) {
+        disjoint_factors.insert(factor);
+      }
+    }
+
+    for (int64_t factor : common_factors) {
+      if (lhs.factorIndexToSharding[factor].axisRefs != rhs.factorIndexToSharding[factor].axisRefs) {
+        operands_are_conformable = false;
+        break;
+      }
+    }
+
+    if (result.factorIndexToSharding.size() == disjoint_factors.size()) {
+      for (int64_t factor : disjoint_factors) {
+        if (result.factorIndexToSharding.find(factor) == result.factorIndexToSharding.end()) {
+          operands_are_conformable = false;
+          break;
+        } else {
+          const FactorSharding& search_sharding = lhs.factorIndexToSharding.contains(factor) ? lhs.factorIndexToSharding[factor] : rhs.factorIndexToSharding[factor];
+          if (search_sharding.axisRefs != result.factorIndexToSharding[factor].axisRefs) {
+            operands_are_conformable = false;
+            break;
+          }
+        }
+      }
+    } else {
+      operands_are_conformable = false;
+    }
+
+    if (operands_are_conformable) {
+      // No need to insert all-reduces on a conformable dot operation.
+      return;
+    }
+  }
+  // TODO(tomnatan): consider supporting multi-input all-reduce op.
+  for (Value result : op->getResults()) {
+    TensorShardingAttr resultSharding =
+        getOrCreateSharding(result, commonAxesPerFactorWithMesh.mesh.name(),
+                            /*closedIfMissing=*/true);
+    SmallVector<AxisRefAttr> allReduceAxes =
+        getAxisSetDiff(reductionAxes, resultSharding.getUnreducedAxes(), mesh);
+    if (allReduceAxes.empty()) {
+      continue;
+    }
+    auto allReduceOp = rewriter.create<AllReduceOp>(
+        result.getLoc(), result, allReduceAxes, resultSharding);
+    rewriter.replaceAllUsesExcept(result, allReduceOp, allReduceOp);
+  }
+}
+
 struct FactorAxesPair {
   constexpr static int64_t kEmptyFactorIndex = -1;
   constexpr static int64_t kTombstoneFactorIndex = -2;

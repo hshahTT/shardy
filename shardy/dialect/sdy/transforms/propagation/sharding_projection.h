@@ -90,6 +90,53 @@ struct TensorFactorShardings {
     return !(*this == other);
   }
 
+  friend llvm::raw_ostream& operator<<(llvm::raw_ostream& os, const TensorFactorShardings& shardings) {
+    os << "{";
+    bool first = true;
+    for (const auto& kv : shardings.factorIndexToSharding) {
+      if (!first) os << ", ";
+      first = false;
+      os << "factor " << kv.first << ": [";
+      for (size_t i = 0; i < kv.second.axisRefs.size(); ++i) {
+        if (i > 0) os << ", ";
+        os << kv.second.axisRefs[i];
+      }
+      os << "]";
+      if (!kv.second.overflowAxes.empty()) {
+        os << " overflow: [";
+        for (size_t i = 0; i < kv.second.overflowAxes.size(); ++i) {
+          if (i > 0) os << ", ";
+          os << kv.second.overflowAxes[i];
+        }
+        os << "]";
+      }
+      if (kv.second.isClosed) {
+        os << " closed";
+      }
+      if (kv.second.isMinorMost) {
+        os << " minor-most";
+      }
+    }
+    if (!shardings.replicatedAxes.empty()) {
+      os << ", replicated: [";
+      for (size_t i = 0; i < shardings.replicatedAxes.size(); ++i) {
+        if (i > 0) os << ", ";
+        os << shardings.replicatedAxes[i];
+      }
+      os << "]";
+    }
+    if (!shardings.unreducedAxes.empty()) {
+      os << ", unreduced: [";
+      for (size_t i = 0; i < shardings.unreducedAxes.size(); ++i) {
+        if (i > 0) os << ", ";
+        os << shardings.unreducedAxes[i];
+      }
+      os << "]";
+    }
+    os << "}";
+    return os;
+  }
+
   // Expands the sharding axes of the given `factorIndex` to `newAxes` if
   // 1. this tensor is associated with that factor, and
   // 2. the existing axes are a strict prefix of `newAxes`.
