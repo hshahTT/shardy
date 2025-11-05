@@ -42,6 +42,7 @@ limitations under the License.
 #include "shardy/dialect/sdy/ir/utils.h"
 #include "shardy/dialect/sdy/transforms/propagation/sharding_projection.h"
 #include "shardy/dialect/sdy/transforms/propagation/utils.h"
+#include "stablehlo/dialect/StablehloOps.h"
 
 namespace mlir {
 namespace sdy {
@@ -914,6 +915,66 @@ void insertAllReducesForReductionFactors(
   if (op->getResults().empty()) {
     return;
   }
+
+  if (isa<stablehlo::DotGeneralOp>(op) || isa<stablehlo::DotOp>(op)) {
+    ShardingProjection opProjection = ShardingProjection::build(op, shardingRule, mesh.attr());
+    assert(opProjection.getNumOperands() == 2);
+    assert(opProjection.getNumResults() == 1);
+    TensorFactorShardings lhs = opProjection.getOperand(0);
+    TensorFactorShardings rhs = opProjection.getOperand(1);
+    TensorFactorShardings result = opProjection.getResult(0);
+
+    llvm::DenseSet<int64_t> common_factors;
+    llvm::DenseSet<int64_t> all_factors;
+    bool operands_are_conformable = true;
+    for (const int64_t factor : lhs.factorIndexToSharding.keys()) {
+      all_factors.insert(factor);
+      if (rhs.factorIndexToSharding.contains(factor)) {
+        common_factors.insert(factor);
+      }
+    }
+    for (const int64_t factor : rhs.factorIndexToSharding.keys()) {
+      all_factors.insert(factor);
+    }
+
+    llvm::DenseSet<int64_t> disjoint_factors;
+    for (const int64_t factor : all_factors) {
+      if (!common_factors.contains(factor)) {
+        disjoint_factors.insert(factor);
+      }
+    }
+
+    for (int64_t factor : common_factors) {
+      if (lhs.factorIndexToSharding[factor].axisRefs != rhs.factorIndexToSharding[factor].axisRefs) {
+        operands_are_conformable = false;
+        break;
+      }
+    }
+
+    if (result.factorIndexToSharding.size() == disjoint_factors.size()) {
+      for (int64_t factor : disjoint_factors) {
+        if (result.factorIndexToSharding.find(factor) == result.factorIndexToSharding.end()) {
+          operands_are_conformable = false;
+          break;
+        } else {
+          const FactorSharding& search_sharding = lhs.factorIndexToSharding.contains(factor) ? lhs.factorIndexToSharding[factor] : rhs.factorIndexToSharding[factor];
+          if (search_sharding.axisRefs != result.factorIndexToSharding[factor].axisRefs) {
+            operands_are_conformable = false;
+            break;
+          }
+        }
+      }
+    } else {
+      operands_are_conformable = false;
+    }
+
+    if (operands_are_conformable) {
+      // No need to insert all-reduces on a conformable dot operation.
+      return;
+    }
+  }
+
+
   SmallVector<AxisRefAttr> reductionAxes = getReductionAxes(
       op, shardingProjection, commonAxesPerFactor, shardingRule, onFullVersion);
   if (reductionAxes.empty()) {
